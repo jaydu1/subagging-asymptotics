@@ -51,25 +51,28 @@ def ar1_cov(rho, n, sigma_sq=1):
 
 
 def generate_data(p, phi, rho_ar1=1., sigma=1, coef='random',
-                  func='quad', df=np.inf, 
+                  func='quad', cov='normal', df=np.inf, 
                   rho=1., n_test=1000, Sigma=None, beta0=None):
     n = int(p/phi)
         
     if Sigma is None:
         Sigma = ar1_cov(rho_ar1, p)
-    
-#     if cov=='ar1':
-        
-#     elif cov=='random':
-#         s = np.diag(np.random.uniform(1., 2., size=p))
-#         Q, _ = np.linalg.qr(np.random.rand(p, p))
-#         Sigma = Q.T @ s @ Q
-    if df==np.inf:
+
+    if cov=='normal':
         Z = np.random.normal(size=(n,p))
         Z_test = np.random.normal(size=(n_test,p))
+    elif cov.startswith('t'):
+        df_cov = int(cov.split('-')[1]) if '-' in cov else df
+        Z = np.random.standard_t(df=df_cov, size=(n,p)) / np.sqrt(df_cov / (df_cov - 2))
+        Z_test = np.random.standard_t(df=df_cov, size=(n_test,p)) / np.sqrt(df_cov / (df_cov - 2))
+    elif cov=='rademacher':
+        Z = np.random.choice([-1, 1], size=(n, p))
+        Z_test = np.random.choice([-1, 1], size=(n_test, p))
+    elif cov=='uniform':
+        Z = np.random.uniform(-1, 1, size=(n, p)) / np.sqrt(1/3)
+        Z_test = np.random.uniform(-1, 1, size=(n_test, p)) / np.sqrt(1/3)
     else:
-        Z = np.random.standard_t(df=df, size=(n,p)) / np.sqrt(df / (df - 2))
-        Z_test = np.random.standard_t(df=df, size=(n_test,p)) / np.sqrt(df / (df - 2))
+        raise ValueError('Not implemented.')
     
     Sigma_sqrt = sqrtm(Sigma)
     X = Z @ Sigma_sqrt #/ np.sqrt(p)

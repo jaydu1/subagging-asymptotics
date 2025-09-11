@@ -4,24 +4,28 @@
 ## Scripts for computing theoretical and empirical risks
 
 - Lasso    
-    - Risk of lasso and optimal lasso ensemble (Figures 4, 5 and 10):
+    - Risk of lasso and optimal lasso ensemble (Figures 4, 5 and 12):
         - `run_lasso_opt.py`    
-    - Risk of full lasso ensemble (Figures 6 and 11):
+    - Risk of full lasso ensemble (Figures 6 and 14):
         - `run_lasso_equiv.py`
     - Risk of optimal lasso ensemble (Figure 7):
         - `run_lasso_opt_2.py`
-    - Fixed-point quantities of lassoless (Figure 8):
+    - Fixed-point quantities of lassoless (Figure 10):
         - `run_lassoless.py`
-    - Empirical risk of lassoless ensemble (Figure 9):
+    - Empirical risk of lassoless ensemble (Figures 11, 13):
         - `run_lasso_emp.py`
+    - Risk of optimal lasso ensemble with anisotropic covariance (Figure 9)
+        - `run_lasso_opt_aniso.py`
 - Huber
-    - Risk of full unregularized Huber ensemble (Figure 12):
+    - Risk of full unregularized Huber ensemble (Figure 15):
         - `run_huber.py`
     - Risk of l1-regularized Huber and optimal l1-regularized Huber ensemble (Figures 3):
         - `run_huber_l1_opt.py`
-    - Risk of full l1-regularized Huber ensemble (Figures 2, 8, 13 and 14):
+    - Risk of full l1-regularized Huber ensemble (Figures 2, 16 and 17):
         - `run_huber_l1_emp.py`
         - `run_huber_l1_equiv.py`
+    - Numerical evaluation of theoretical quantities with anisotropic covariance (Figure 8)
+        - `ell1_huber_aniso.ipynb`
 - Utility functions
     - `compute_risk.py`
     - `generate_data.py`   

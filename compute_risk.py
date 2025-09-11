@@ -105,6 +105,7 @@ def comp_risk_ridge(rho, sigma, lam, phi, psi):
 ############################################################################
 
 def soft_threshold(x, tau):
+    x = np.asarray(x)
     return np.maximum(np.abs(x) - tau, 0.) * np.sign(x)
 
 
@@ -215,7 +216,6 @@ def compute_risk_lasso(phi, lam, epsilon, nu, sigma, c = 1, eta=1., tau=None):
         
     delta = c / phi # The inverse data aspect ratio k/p
     psi = 1 / delta
-    # lam = np.maximum(lam/np.sqrt(phi)/np.sqrt(psi), 1e-6)
 
     nu_p = nu * np.sqrt(delta)
     lam = np.maximum(lam, 1e-7)
@@ -265,6 +265,273 @@ def compute_risk_lasso(phi, lam, epsilon, nu, sigma, c = 1, eta=1., tau=None):
     
 
 
+
+def compute_risk_lassoless(phi, lam, epsilon, nu, sigma, tau=None):
+    '''
+    Compute the risk of the Lassoless predictor.
+
+    Parameters
+    ----------
+    phi : float
+        The ratio p/n.
+    lam : float
+        The regularization parameter.
+    epsilon : float
+        The probability of Gaussian features.
+    nu : float
+        The signal strength. For X ~ N(0,1) and Theta ~ sparse * P_{nu} + (1-sparse) * P_0,
+        SNR = sparse * nu**2 / sigma**2.
+    sigma : float
+        The noise level.
+    '''
+    if np.isinf(phi) or np.isinf(lam):
+        return epsilon*nu**2+sigma**2, epsilon*nu**2+sigma**2
+        
+    delta = 1 / phi # The inverse data aspect ratio k/p
+    psi = 1 / delta
+
+    nu_p = nu * np.sqrt(delta)
+    lam = np.maximum(lam, 1e-7)
+    if lam<=1e-6 and psi<=1:
+        if psi<1:
+            tau2 = 1 / (1 - psi) * sigma**2
+            tau = np.sqrt(tau2)
+            a = 0
+        elif psi==1:
+            tau = tau2 = np.inf
+            a = 0
+    else:
+        if tau is None or np.isinf(tau) or np.isnan(tau):
+            tau = sigma
+        zeta = nu_p/tau
+        zeta = fixed_point(F2, zeta, args=(epsilon, delta, lam, nu_p, sigma))
+        a = bisect(F1, 0, np.maximum(1000,1000*lam), (zeta, epsilon, delta, lam, nu_p))
+        tau = nu_p / zeta
+        tau2 = tau**2
+
+    R1 = tau2
+    beta = 0. if lam==0 else lam / a
+    nu = np.sqrt(delta) * beta / tau
+
+    return a, tau, R1
+
+
+
+
+############################################################################
+#
+# Theoretical evaluation of Lasso under anisotropic covariance
+#
+############################################################################
+     
+def prox_prarell(x, Lambda_inv, Lambda_inv_eigen_min, Lambda_inv_eigen_max, tol=1e-5, max_iter=100):
+    '''
+    x: (p, N) np.array
+    return matrix whose i-th column is argmin_p 2^{-1}(x[:,i]-p)^T A^{-1} (x[:,i]-p) + |p|
+    step size is taken as so that the contraction rate is (kappa-1)/(kappa+1) where kappa is the condition number of Lambda_inv
+    '''
+    ## solve by proximal gradient methods
+    step_size = 2/(Lambda_inv_eigen_min+Lambda_inv_eigen_max)
+    cond_num = Lambda_inv_eigen_max/Lambda_inv_eigen_min
+    theta = np.zeros_like(x)
+    for i in range(max_iter):
+        theta = soft_threshold(theta + step_size*Lambda_inv @ (x-theta), step_size)
+        if ((cond_num-1)/(cond_num+1))**i < tol:
+            break
+        if i == max_iter-1:
+            print('proximal gradient descent failed to converge with cond_num={}, contraction={}'.format(
+                cond_num, ((cond_num-1)/(cond_num+1))**i))
+    return theta
+
+
+
+def compute_risk_lasso_aniso(
+    theta, cov_sqrt, cov_sqrt_inv, rho,
+    phi, lam, sigma, c = 1
+    ):
+    '''
+    Compute the risk of the Lasso ensemble under anisotropic covariance.
+
+    Parameters
+    ----------
+    phi : float
+        The ratio p/n.
+    lam : float
+        The regularization parameter.
+    sigma : float
+        The noise level.
+    c : float
+        The subsample ratio k/n.
+    '''
+    if c>1:
+        return np.nan, np.nan, np.nan
+    if np.isinf(phi) or c==0 or np.isinf(lam):
+        return np.sum(theta**2)+sigma**2, np.sum(theta**2)+sigma**2
+    
+    noise_var = sigma**2
+    delta = 1 / phi # The inverse data aspect ratio k/p
+
+    if lam<1e-6:
+        R1, Rinf, eta = solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, rho)
+    else:
+        R1, Rinf, eta = solve_fixed_point_lasso(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, lam, rho)
+
+    return R1, Rinf, eta
+
+
+def solve_fixed_point_lasso(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, lam, rho):
+    cov = cov_sqrt@cov_sqrt
+    p = len(theta)
+
+    MC_sample = 1000 ## Monte Carlo smaple size to approximate expectation 
+
+    np.random.seed(1)
+    h = np.random.normal(size=(p, MC_sample))
+    
+    def F_4(alpha, beta, kappa, nu):
+        Lambda_inv = lam**(-1) * nu * cov
+        Lambda_inv_eigen_max= lam**(-1) * nu * (1+np.abs(rho))/(1-np.abs(rho))
+        Lambda_inv_eigen_min = lam**(-1) * nu * (1-np.abs(rho))/(1+np.abs(rho))
+    
+        prox_reg = prox_prarell(x=theta[:, None] + beta/nu * cov_sqrt_inv@h, Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+        err_MF = cov_sqrt @ (prox_reg-theta[:, None])
+
+        alpha_sq_new = np.mean(err_MF**2)
+        kappa_new = np.mean(err_MF * h)
+        beta_sq_new = c * delta * (noise_var + alpha**2)/(1+kappa)**2
+        nu_new = c * delta/(1+kappa)
+
+        return np.sqrt(alpha_sq_new), np.sqrt(beta_sq_new), kappa_new, nu_new
+    
+    run_num = 30
+    alpha, beta, kappa, nu = 1, 1, 1, 1
+    for _ in range(run_num):
+        alpha_new, beta_new, kappa_new, nu_new = F_4(alpha, beta, kappa, nu)
+        increment = (alpha_new-alpha)**2 + (beta_new-beta)**2 + (kappa_new-kappa)**2 + (nu_new-nu)**2
+        alpha = alpha_new
+        beta = beta_new
+        kappa = kappa_new
+        nu = nu_new
+        if increment < 1e-07:
+            break
+        if _==run_num-1:
+            print('failed to converge, M1_sytemm, iter={}, increment={}'.format(_+1, increment))
+    
+    if np.isclose(c,1):
+        etaH=1
+        etaG=1
+    else:        
+        np.random.seed(0)
+        H1 = np.random.normal(size=(p, MC_sample))
+        H2 = np.random.normal(size=(p, MC_sample))
+
+        def F_loss(etaG):
+            return delta * c**2 /beta**2 * (noise_var+alpha**2 *etaG)/(1+kappa)**2
+        
+        def F_reg(etaH):
+            Lambda_inv = lam**(-1) * nu * cov
+            Lambda_inv_eigen_max= lam**(-1) * nu * (1+np.abs(rho))/(1-np.abs(rho))
+            Lambda_inv_eigen_min = lam**(-1) * nu * (1-np.abs(rho))/(1+np.abs(rho))
+            
+            prox_1 = prox_prarell(x=theta[:, None] + beta/nu * cov_sqrt_inv@ H1, Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            prox_2 = prox_prarell(x=theta[:, None] + beta/nu * cov_sqrt_inv@ (etaH * H1 + np.sqrt(1-etaH**2) * H2), Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            err_MF_1 = cov_sqrt @ (prox_1-theta[:, None])
+            err_MF_2 = cov_sqrt @ (prox_2-theta[:, None])
+            return np.mean(err_MF_1*err_MF_2)/np.sqrt(np.mean(err_MF_1**2) * np.mean(err_MF_2**2))
+
+        etaG = 0
+        run_num = 20
+        for _ in range(run_num):
+            etaH = np.clip(F_loss(etaG), -c, c)
+            etaG_new = np.clip(F_reg(etaH), -1, 1)
+            increment = np.abs(etaG_new-etaG)
+            etaG = etaG_new
+            if increment < 1e-07:
+                break
+            if _==run_num-1:
+                print('failed to converge, Minfty_sytemm, iter={}, increment={}'.format(_+1, increment))
+            
+    return alpha**2 + noise_var, etaG * alpha**2 + noise_var, etaG
+
+
+def solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, rho):
+    if c * delta > 1:
+        tau = np.sqrt(c*delta / (c*delta-1) * noise_var)
+        xi = np.sqrt(delta/(delta-1) * noise_var)
+    elif np.isclose(c*delta, 1):
+        tau = np.inf
+        xi = np.sqrt(delta/(delta-1) * noise_var)
+    else:
+        cov = cov_sqrt @ cov_sqrt
+        p = len(theta)
+        MC_sample = 1000 ## Monte Carlo smaple size to approximate expectation 
+    
+        np.random.seed(1)
+        h = np.random.normal(size=(p, MC_sample))
+        def F1(a, tau):
+            Lambda_inv = np.sqrt(c*delta)/(a*tau) * cov
+            Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
+            Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
+
+            prox_reg = prox_prarell(x= theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ h, 
+                                    Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            err_MF = cov_sqrt @ (prox_reg - theta[:, None])
+            l2_norm = np.sum(err_MF ** 2)/MC_sample/p
+            return np.sqrt(noise_var + l2_norm)
+        
+        def F2(a, tau):
+            Lambda_inv = np.sqrt(c*delta)/(a*tau) * cov
+            Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
+            Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
+            prox_reg = prox_prarell(x= theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ h, 
+                                    Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            err_MF = cov_sqrt @ (prox_reg - theta[:, None])
+            return c*delta - np.sqrt(c*delta)/tau * np.sum(h * err_MF)/MC_sample/p
+        
+        a, tau = 1, 1
+        run_num = 20
+        for _ in range(run_num):
+            a_new = bisect(F2, 0.05, 100, tau, xtol=1e-04, rtol=np.float64(1e-04), maxiter=20)
+            tau_new = F1(a_new, tau)  
+            increment = (tau_new/tau-1)**2
+
+            a = a_new
+            tau = tau_new
+            if increment < 1e-03:
+                break
+            if _==run_num-1:
+                print('failed to converge, M1_sytemm, iter={}, increment={}'.format(_+1, increment))
+        
+    
+        np.random.seed(0)
+        H1 = np.random.normal(size=(p, MC_sample))
+        H2 = np.random.normal(size=(p, MC_sample))
+
+        def F_reg(xi):
+            etaH = np.clip(c * xi**2/tau**2, -1, 1)
+            Lambda_inv = np.sqrt(c*delta)/(a*tau) * cov
+            Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
+            Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
+            prox_1 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ H1, Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            prox_2 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ (etaH * H1 + np.sqrt(1-etaH**2) * H2), Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            
+            err_1_MF = cov_sqrt @ (prox_1-theta[:, None])
+            err_2_MF = cov_sqrt @ (prox_2-theta[:, None])
+
+            return np.sum(err_1_MF*err_2_MF)/MC_sample/p + noise_var
+
+        xi = np.sqrt(noise_var)
+        run_num = 20
+        for _ in range(run_num):
+            xi_new = np.sqrt(F_reg(xi))
+            increment = (xi_new/xi-1)**2
+            xi=xi_new
+            if increment < 1e-05:
+                break
+            if _==run_num-1:
+                print('does not converge, Minfty_sytemm, iter={}, increment={}'.format(_+1, increment))
+
+    return tau**2, xi**2, (xi**2-noise_var)/(tau**2-noise_var)
 
 
 
@@ -424,10 +691,8 @@ def fit_predict(X, Y, X_test, method, param):
             lam = param
             if method=='ridge':
                 regressor = Ridgeless() if lam==0 else Ridge(alpha=lam, fit_intercept=False, solver='lsqr')
-    #             regressor = Ridge(alpha=np.maximum(lam,1e-6), fit_intercept=False, solver='lsqr')
                 regressor.fit(X/sqrt_k, Y/sqrt_k)
             else:
-                # lam = lam/X.shape[0]
                 regressor = Lasso(alpha=np.maximum(lam,1e-6), 
                     tol=1e-8, max_iter=10000, fit_intercept=False)
                 regressor.fit(X*sqrt_k, Y*sqrt_k)
