@@ -379,7 +379,7 @@ def compute_risk_lasso_aniso(
     return R1, Rinf, eta
 
 
-def solve_fixed_point_lasso(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, lam, rho):
+def solve_fixed_point_lasso(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, lam, rho, max_iter=100):
     cov = cov_sqrt@cov_sqrt
     p = len(theta)
 
@@ -388,31 +388,44 @@ def solve_fixed_point_lasso(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, 
     np.random.seed(1)
     h = np.random.normal(size=(p, MC_sample))
     
-    def F_4(alpha, beta, kappa, nu):
-        Lambda_inv = lam**(-1) * nu * cov
-        Lambda_inv_eigen_max= lam**(-1) * nu * (1+np.abs(rho))/(1-np.abs(rho))
-        Lambda_inv_eigen_min = lam**(-1) * nu * (1-np.abs(rho))/(1+np.abs(rho))
-    
-        prox_reg = prox_prarell(x=theta[:, None] + beta/nu * cov_sqrt_inv@h, Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+    def F1(a, tau):
+        Lambda_inv = np.sqrt(c*delta)/(a*tau) * cov
+        Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
+        Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
+
+        prox_reg = prox_prarell(x= theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ h, 
+                                Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
         err_MF = cov_sqrt @ (prox_reg-theta[:, None])
-
-        alpha_sq_new = np.mean(err_MF**2)
-        kappa_new = np.mean(err_MF * h)
-        beta_sq_new = c * delta * (noise_var + alpha**2)/(1+kappa)**2
-        nu_new = c * delta/(1+kappa)
-
-        return np.sqrt(alpha_sq_new), np.sqrt(beta_sq_new), kappa_new, nu_new
+        l2_norm = np.sum(err_MF ** 2)/MC_sample/p
+        return np.sqrt(noise_var + l2_norm)
     
-    run_num = 30
-    alpha, beta, kappa, nu = 1, 1, 1, 1
+    def F2(a, tau):
+        Lambda_inv = np.sqrt(c*delta)/(a*tau) * cov
+        Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
+        Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
+        prox_reg = prox_prarell(x= theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ h, 
+                                Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+        err_MF = cov_sqrt @ (prox_reg-theta[:, None])
+        return c*delta - np.sqrt(c*delta)/tau * np.sum(h * err_MF)/MC_sample/p - np.sqrt(c*delta)/(a*tau) * lam ## add lambda term
+    
+    a, tau = 1, 1
+    run_num = 20
     for _ in range(run_num):
-        alpha_new, beta_new, kappa_new, nu_new = F_4(alpha, beta, kappa, nu)
-        increment = (alpha_new-alpha)**2 + (beta_new-beta)**2 + (kappa_new-kappa)**2 + (nu_new-nu)**2
-        alpha = alpha_new
-        beta = beta_new
-        kappa = kappa_new
-        nu = nu_new
-        if increment < 1e-07:
+        ## find a_min and a_max such that F2(a_min) < 0 < F2(a_max)
+        a_min = 0.05
+        a_max = 100
+        while F2(a_min, tau)>=0:
+            a_min /= 2
+        while F2(a_max, tau)<=0:
+            a_max *= 2
+
+        a_new = bisect(F2, a_min, a_max, tau, xtol=1e-04, rtol=np.float64(1e-04), maxiter=20)
+
+        tau_new = F1(a_new, tau)
+        increment = (tau_new/tau-1)**2
+        a = a_new
+        tau = tau_new
+        if increment < 1e-03:
             break
         if _==run_num-1:
             print('failed to converge, M1_sytemm, iter={}, increment={}'.format(_+1, increment))
@@ -425,36 +438,35 @@ def solve_fixed_point_lasso(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, 
         H1 = np.random.normal(size=(p, MC_sample))
         H2 = np.random.normal(size=(p, MC_sample))
 
-        def F_loss(etaG):
-            return delta * c**2 /beta**2 * (noise_var+alpha**2 *etaG)/(1+kappa)**2
+        def F_reg(xi):
+            etaH = np.clip(c * xi**2/tau**2, -1, 1)
+            Lambda_inv = np.sqrt(c*delta)/(a*tau) * cov
+            Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
+            Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
+            prox_1 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ H1, 
+                Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            prox_2 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ (etaH * H1 + np.sqrt(1-etaH**2) * H2), 
+                Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            err_1_MF = cov_sqrt @ (prox_1-theta[:, None])
+            err_2_MF = cov_sqrt @ (prox_2-theta[:, None])
+
+            return np.sum(err_1_MF*err_2_MF)/MC_sample/p + noise_var
         
-        def F_reg(etaH):
-            Lambda_inv = lam**(-1) * nu * cov
-            Lambda_inv_eigen_max= lam**(-1) * nu * (1+np.abs(rho))/(1-np.abs(rho))
-            Lambda_inv_eigen_min = lam**(-1) * nu * (1-np.abs(rho))/(1+np.abs(rho))
-            
-            prox_1 = prox_prarell(x=theta[:, None] + beta/nu * cov_sqrt_inv@ H1, Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
-            prox_2 = prox_prarell(x=theta[:, None] + beta/nu * cov_sqrt_inv@ (etaH * H1 + np.sqrt(1-etaH**2) * H2), Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
-            err_MF_1 = cov_sqrt @ (prox_1-theta[:, None])
-            err_MF_2 = cov_sqrt @ (prox_2-theta[:, None])
-            return np.mean(err_MF_1*err_MF_2)/np.sqrt(np.mean(err_MF_1**2) * np.mean(err_MF_2**2))
-
-        etaG = 0
-        run_num = 20
-        for _ in range(run_num):
-            etaH = np.clip(F_loss(etaG), -c, c)
-            etaG_new = np.clip(F_reg(etaH), -1, 1)
-            increment = np.abs(etaG_new-etaG)
-            etaG = etaG_new
-            if increment < 1e-07:
-                break
-            if _==run_num-1:
-                print('failed to converge, Minfty_sytemm, iter={}, increment={}'.format(_+1, increment))
-            
-    return alpha**2 + noise_var, etaG * alpha**2 + noise_var, etaG
+    xi = np.sqrt(noise_var)
+    run_num = 20
+    for _ in range(run_num):
+        xi_new = np.sqrt(F_reg(xi))
+        increment = (xi_new/xi-1)**2
+        xi=xi_new
+        if increment < 1e-05:
+            break
+        if _==run_num-1:
+            print('does not converge, Minfty_sytemm, iter={}, increment={}'.format(_+1, increment))
+        
+    return tau**2, xi**2, (xi**2-noise_var)/(tau**2-noise_var)
 
 
-def solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, rho):
+def solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_inv, rho, max_iter=100):
     if c * delta > 1:
         tau = np.sqrt(c*delta / (c*delta-1) * noise_var)
         xi = np.sqrt(delta/(delta-1) * noise_var)
@@ -474,7 +486,7 @@ def solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_i
             Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
 
             prox_reg = prox_prarell(x= theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ h, 
-                                    Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+                                    Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max, max_iter=max_iter)
             err_MF = cov_sqrt @ (prox_reg - theta[:, None])
             l2_norm = np.sum(err_MF ** 2)/MC_sample/p
             return np.sqrt(noise_var + l2_norm)
@@ -484,14 +496,14 @@ def solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_i
             Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
             Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
             prox_reg = prox_prarell(x= theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ h, 
-                                    Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+                                    Lambda_inv = Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max, max_iter=max_iter)
             err_MF = cov_sqrt @ (prox_reg - theta[:, None])
             return c*delta - np.sqrt(c*delta)/tau * np.sum(h * err_MF)/MC_sample/p
         
         a, tau = 1, 1
-        run_num = 20
+        run_num = max_iter
         for _ in range(run_num):
-            a_new = bisect(F2, 0.05, 100, tau, xtol=1e-04, rtol=np.float64(1e-04), maxiter=20)
+            a_new = bisect(F2, 0.05, 100, tau, xtol=1e-04, rtol=np.float64(1e-04), maxiter=max_iter)
             tau_new = F1(a_new, tau)  
             increment = (tau_new/tau-1)**2
 
@@ -512,8 +524,8 @@ def solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_i
             Lambda_inv = np.sqrt(c*delta)/(a*tau) * cov
             Lambda_inv_eigen_min = np.sqrt(c*delta)/(a*tau) * (1-np.abs(rho))/(1+np.abs(rho))
             Lambda_inv_eigen_max = np.sqrt(c*delta)/(a*tau) * (1+np.abs(rho))/(1-np.abs(rho))
-            prox_1 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ H1, Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
-            prox_2 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ (etaH * H1 + np.sqrt(1-etaH**2) * H2), Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max)
+            prox_1 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ H1, Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max, max_iter=max_iter)
+            prox_2 = prox_prarell(x=theta[:, None] + tau/np.sqrt(c*delta) * cov_sqrt_inv @ (etaH * H1 + np.sqrt(1-etaH**2) * H2), Lambda_inv=Lambda_inv, Lambda_inv_eigen_min=Lambda_inv_eigen_min, Lambda_inv_eigen_max=Lambda_inv_eigen_max, max_iter=max_iter)
             
             err_1_MF = cov_sqrt @ (prox_1-theta[:, None])
             err_2_MF = cov_sqrt @ (prox_2-theta[:, None])
@@ -521,7 +533,7 @@ def solve_fixed_point_lassoless(c, delta, noise_var, theta, cov_sqrt, cov_sqrt_i
             return np.sum(err_1_MF*err_2_MF)/MC_sample/p + noise_var
 
         xi = np.sqrt(noise_var)
-        run_num = 20
+        run_num = max_iter
         for _ in range(run_num):
             xi_new = np.sqrt(F_reg(xi))
             increment = (xi_new/xi-1)**2
